@@ -1,13 +1,19 @@
 <script>
+  import ConversionPage from "./ConversionPage.svelte";
+
   let session = null;
   let logs = [];
   let loginUser = "surveyor";
   let loginPass = "surv123456";
-  let chainage = "";
-  let deltaMm = "";
   let error = "";
   let loading = false;
   let timer;
+  let pageRefresh = null;
+
+  let page =
+    typeof window !== "undefined" && window.location.hash === "#/conversion"
+      ? "conversion"
+      : "logs";
 
   $: isWriter = session?.role === "writer";
 
@@ -15,7 +21,7 @@
     return session ? { Authorization: "Bearer " + session.token } : {};
   }
 
-  async function refresh() {
+  async function refreshLogs() {
     if (!session) return;
     const res = await fetch("/api/logs", { headers: headers() });
     if (res.status === 401) {
@@ -23,6 +29,21 @@
       return;
     }
     if (res.ok) logs = await res.json();
+  }
+
+  async function tick() {
+    await refreshLogs();
+    if (pageRefresh) await pageRefresh();
+  }
+
+  function goto(p) {
+    page = p;
+    const hash = p === "conversion" ? "#/conversion" : "#/logs";
+    if (window.location.hash !== hash) window.location.hash = hash;
+  }
+
+  function onHashChange() {
+    page = window.location.hash === "#/conversion" ? "conversion" : "logs";
   }
 
   async function login() {
@@ -41,8 +62,8 @@
       }
       session = { token: data.access_token, username: data.username, role: data.role };
       localStorage.setItem("tunnel_session", JSON.stringify(session));
-      await refresh();
-      timer = setInterval(refresh, 2000);
+      await tick();
+      timer = setInterval(tick, 2000);
     } catch {
       error = "无法连接接口";
     } finally {
@@ -54,43 +75,25 @@
     if (timer) clearInterval(timer);
     session = null;
     logs = [];
+    pageRefresh = null;
     localStorage.removeItem("tunnel_session");
   }
 
-  async function submit() {
-    error = "";
-    loading = true;
-    try {
-      const res = await fetch("/api/logs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...headers() },
-        body: JSON.stringify({ chainage, delta_mm: Number(deltaMm) }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        error = data.detail || "提交失败";
-        return;
-      }
-      chainage = "";
-      deltaMm = "";
-      await refresh();
-    } catch {
-      error = "提交时网络异常";
-    } finally {
-      loading = false;
-    }
+  function registerRefresh(fn) {
+    pageRefresh = fn;
   }
 
   const raw = localStorage.getItem("tunnel_session");
   if (raw) {
     try {
       session = JSON.parse(raw);
-      refresh();
-      timer = setInterval(refresh, 2000);
+      tick();
+      timer = setInterval(tick, 2000);
     } catch {
       localStorage.removeItem("tunnel_session");
     }
   }
+  window.addEventListener("hashchange", onHashChange);
 </script>
 
 <style>
@@ -100,8 +103,19 @@
     background: #1c1917;
     color: #f5f5f4;
   }
-  main { max-width: 960px; margin: 0 auto; padding: 1.5rem; }
-  h1 { color: #fbbf24; margin: 0 0 0.25rem; }
+  main { max-width: 1040px; margin: 0 auto; padding: 1.5rem; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid #44403c; padding-bottom: 0.75rem; margin-bottom: 1rem;
+  }
+  h1 { color: #fbbf24; margin: 0; font-size: 1.35rem; }
+  nav { display: flex; gap: 0.5rem; }
+  nav a {
+    cursor: pointer; padding: 0.35rem 0.85rem; border-radius: 6px;
+    color: #d6d3d1; text-decoration: none; font-size: 0.9rem;
+    border: 1px solid transparent;
+  }
+  nav a.active { background: #7c2d12; color: #fed7aa; border-color: #d97706; }
   .sub { color: #a8a29e; margin-bottom: 1.25rem; }
   section {
     background: #292524; border: 1px solid #44403c; border-radius: 8px;
@@ -118,8 +132,8 @@
   }
   button.secondary { background: #57534e; }
   .err { color: #fb7185; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-  th, td { text-align: left; padding: 0.45rem; border-bottom: 1px solid #44403c; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th, td { text-align: left; padding: 0.45rem; border-bottom: 1px solid #44403c; white-space: nowrap; }
   .tag { padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.8rem; }
   .ok { background: #14532d; color: #86efac; }
   .bad { background: #7f1d1d; color: #fca5a5; }
@@ -127,9 +141,9 @@
 </style>
 
 <main>
-  <h1>隧道收敛测缝台</h1>
   {#if !session}
-    <p class="sub">测量员提交桩号与收敛毫米值，接口进程内线程认领后出结论。登录框已预填可写账号 surveyor / surv123456。</p>
+    <h1>隧道收敛测缝台</h1>
+    <p class="sub">测量员提交弦长或毫米，后台按当量换算成收敛后认领判定。登录框已预填可写账号 surveyor / surv123456。</p>
     <section>
       <label>用户名</label>
       <input bind:value={loginUser} autocomplete="off" />
@@ -139,43 +153,50 @@
       {#if error}<p class="err">{error}</p>{/if}
     </section>
   {:else}
-    <p class="sub">已登录：{session.username}（{isWriter ? "可提交" : "只读"}）</p>
-    <section>
-      <button class="secondary" on:click={logout}>退出</button>
-      <button class="secondary" disabled={loading} on:click={refresh}>刷新列表</button>
-    </section>
-    {#if isWriter}
+    <div class="topbar">
+      <h1>隧道收敛测缝台</h1>
+      <nav>
+        <a href="#/logs" class="{page === 'logs' ? 'active' : ''}" on:click={() => goto("logs")}>收敛记录</a>
+        <a href="#/conversion" class="{page === 'conversion' ? 'active' : ''}" on:click={() => goto("conversion")}>当量换算</a>
+      </nav>
+      <div>
+        <span class="sub" style="margin:0 0.75rem 0 0;">{session.username}（{isWriter ? "测量员" : "巡检员"}）</span>
+        <button class="secondary" on:click={logout}>退出</button>
+      </div>
+    </div>
+
+    {#if page === "conversion"}
+      <ConversionPage {session} {registerRefresh} />
+    {:else}
       <section>
-        <label>里程桩号</label>
-        <input placeholder="例如 K20+050" bind:value={chainage} />
-        <label>收敛（毫米，可正可负）</label>
-        <input type="number" step="0.1" bind:value={deltaMm} />
-        <button disabled={loading} on:click={submit}>提交（进入待认领）</button>
-        {#if error}<p class="err">{error}</p>{/if}
+        <table>
+          <thead>
+            <tr>
+              <th>编号</th><th>桩号</th><th>来路</th><th>弦长mm</th><th>当量</th>
+              <th>收敛mm</th><th>状态</th><th>结论</th><th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each logs as row}
+              <tr>
+                <td>{row.id}</td>
+                <td>{row.chainage}</td>
+                <td>{row.input_mode === "chord" ? "弦长路" : "毫米路"}</td>
+                <td>{row.chord_mm ?? "—"}</td>
+                <td>{row.coefficient ?? "—"}</td>
+                <td>{row.delta_mm}</td>
+                <td><span class="tag {row.status === 'pending' ? 'pending' : 'ok'}">{row.status === 'pending' ? '待处理' : '已完成'}</span></td>
+                <td>
+                  {#if row.verdict}
+                    <span class="tag {row.verdict === '合格' ? 'ok' : 'bad'}">{row.verdict}</span>
+                  {:else}—{/if}
+                </td>
+                <td style="white-space:normal;">{row.reason ?? "—"}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       </section>
     {/if}
-    <section>
-      <table>
-        <thead>
-          <tr><th>编号</th><th>桩号</th><th>收敛mm</th><th>状态</th><th>结论</th><th>说明</th></tr>
-        </thead>
-        <tbody>
-          {#each logs as row}
-            <tr>
-              <td>{row.id}</td>
-              <td>{row.chainage}</td>
-              <td>{row.delta_mm}</td>
-              <td><span class="tag {row.status === 'pending' ? 'pending' : 'ok'}">{row.status === 'pending' ? '待处理' : '已完成'}</span></td>
-              <td>
-                {#if row.verdict}
-                  <span class="tag {row.verdict === '合格' ? 'ok' : 'bad'}">{row.verdict}</span>
-                {:else}—{/if}
-              </td>
-              <td>{row.reason ?? "—"}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </section>
   {/if}
 </main>
